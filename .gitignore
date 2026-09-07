@@ -1,0 +1,5 @@
+profiles/
+*.conf
+profiles.json
+*.env
+__pycache__/
