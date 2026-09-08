@@ -1,123 +1,76 @@
 # Git & GitHub Multi-Account Profile Manager
 
-A command-line tool for macOS and Linux to manage and switch between multiple Git identities (`user.name`, `user.email`) and GitHub authentication credentials on a single machine.
+A command-line tool for macOS and Linux to save and switch between multiple GitHub logins — updating your **Git identity** (`user.name`, `user.email`) and your **GitHub authentication** (which account `git push`/`pull` and your editor actually log in as) together, with one command.
 
-Designed for developers managing:
-- Company / organizational repositories
-- Personal open-source projects
-- Freelance / client repositories
+Built for developers juggling:
+- Company / organizational accounts
+- Personal open-source accounts
+- Freelance / client accounts
 
 ---
 
 ## Features
 
-- **Global Switching**: Updates `git config --global user.name`, `user.email`, and GitHub credential resolution.
-- **Multi-Account GitHub Auth via `gh` CLI**: Routes `git`'s credential helper through `gh auth git-credential`, so pushes/pulls/clones from *any* tool that shells out to git — including VS Code's Source Control panel and Copilot's git operations — resolve the account you just switched to, not whichever one happened to be cached. Falls back to macOS Keychain (single-account only) if `gh` isn't installed.
-- **VS Code Profile Launcher**: Optionally opens a VS Code window pinned to a named [VS Code Profile](https://code.visualstudio.com/docs/editor/profiles) when you switch accounts, so each identity gets its own editor window/extension state.
-- **Auto-Initializing Storage**: Generates a local `profiles.json` configuration file on first execution with restricted user permissions (`chmod 600`).
-- **Safe for Version Control**: The repository `.gitignore` automatically excludes `profiles.json`. Sensitive personal tokens and account details are never tracked or pushed.
-- **Clipboard Integration**: Supports importing Personal Access Tokens directly from macOS clipboard (`pbpaste`) to prevent terminal escape-sequence errors.
-- **API Validation**: Validates access tokens against the GitHub REST API before saving.
-- **Clean CLI Interface**: Text-based interface with clear formatting and masked token previews.
+- **Save any number of GitHub accounts** — nickname, username, email, and Personal Access Token, validated against the GitHub API before saving.
+- **Switch account in one step** — updates `git config --global user.name` / `user.email` **and** logs Git's credential system into the matching GitHub account, so `git push` immediately authenticates as the account you just switched to, not a stale/previous one.
+- **View / Delete accounts** — list all saved accounts (tokens masked) or remove one by number, username, or email.
+- **Optional VS Code Profile launch** — jump straight into a VS Code window already scoped to that account.
+- **Secure local storage** — accounts live only in a local `profiles.json` / `profiles/*.conf`, `chmod 600`, and git-ignored — never committed, never leaves your machine.
 
 ---
 
-## Why this exists: two separate GitHub logins
+## Prerequisites
 
-There are two independent places GitHub identity lives on your machine, and switching one does **not** switch the other:
+Pick **one** of the two scripts — both do the same thing:
 
-1. **Git's credential store** (what `git push`/`pull`/`clone` and VS Code's Source Control panel use). This is what `Switch Account` below manages.
-2. **VS Code's own "Sign in with GitHub"** (Accounts icon, bottom-left) — a separate OAuth session used by the GitHub Pull Requests extension, Copilot, and Settings Sync. It cannot be set from a token; it always requires an interactive sign-in in that VS Code window. This tool cannot log you into it directly, but it can open the right *VS Code Profile* window for you (see below), where each profile keeps its own independent sign-in.
+| Script | Requires | Notes |
+|---|---|---|
+| `enter-git-config.py` (recommended) | **Python 3** (preinstalled on macOS/most Linux) | Cross-platform, JSON storage (`profiles.json`) |
+| `enter-git-config.sh` | **Nothing extra** — just `bash` (preinstalled on macOS/Linux) | No Python needed at all |
 
-### Git credential resolution (fixed via `gh` CLI)
+Both scripts also need, already on virtually every Mac/Linux dev machine:
+- `git` and `curl`
 
-Earlier versions of this tool stored tokens directly in the macOS Keychain, keyed by `protocol=https,host=github.com` with no username. Because multiple accounts share the same host, the Keychain lookup could return a stale entry from a previous switch — `git`/VS Code would silently authenticate as the wrong account even though `user.name`/`user.email` looked correct. It also only worked on macOS.
+**Strongly recommended (for correct GitHub login switching):**
+- [GitHub CLI (`gh`)](https://cli.github.com) — without it, only your Git identity (`user.name`/`user.email`) switches; GitHub *authentication* falls back to a single-account macOS Keychain entry that can get out of sync across accounts.
+  ```bash
+  brew install gh        # macOS
+  sudo apt install gh    # Debian/Ubuntu — see https://github.com/cli/cli/blob/trunk/docs/install_linux.md
+  ```
+  No manual `gh` setup needed beyond installing it — the tool runs `gh auth login` / `gh auth switch` / `gh auth setup-git` for you automatically.
 
-This is now fixed by delegating to [GitHub CLI (`gh`)](https://cli.github.com), which natively tracks multiple accounts per host and always resolves the one you last made active — and behaves the same on macOS and Linux:
-
-```bash
-brew install gh        # macOS
-sudo apt install gh    # Debian/Ubuntu — see https://github.com/cli/cli/blob/trunk/docs/install_linux.md
-```
-
-Nothing else to configure — `Switch Account` and `Add New Account` automatically call `gh auth login --with-token`, `gh auth switch`, and `gh auth setup-git` for you. If `gh` isn't installed, the tool warns you and falls back to the old macOS-only Keychain method.
-
-### VS Code Profiles (for the Accounts-panel sign-in)
-
-1. In VS Code: Profiles icon (bottom-left) → **Create Profile**, name it to match an account (e.g. `Work`, `Personal`).
-2. While that profile is active, click the **Accounts** icon → **Sign in with GitHub**, and complete the OAuth flow for that specific account. This is a one-time step per profile.
-3. When adding/switching an account in this tool, enter that same profile name at the `VS Code Profile name` prompt. On switch, the tool offers to run `code -n --profile "<name>"`, opening a new window already signed in as the right account.
+**Optional:**
+- [VS Code](https://code.visualstudio.com) with the `code` CLI on your `PATH`, only if you want the "open matching VS Code Profile" feature.
 
 ---
 
-## Repository Structure
+## Installation
 
-```text
-gitconfigurescripts/
-├── README.md               # Documentation and setup instructions
-├── .gitignore              # Ignores profiles.json and credential files
-├── enter-git-config.py     # Python CLI tool (recommended)
-├── enter-git-config.sh     # Shell script alternative
-└── profiles.json           # Local storage (created on first run, chmod 600, not committed)
-```
-
----
-
-## Setup Instructions
-
-Clone or download the repository into your preferred directory (e.g., `/Users/<user>/gitconfigurescripts` or `~/gitconfigurescripts`), then set up execution using one of the methods below.
-
-### Option 1: System-wide Binary (Recommended)
-
-Create a symlink in `/usr/local/bin` to allow running the command from any directory:
+Clone or download this repo anywhere, e.g. `~/gitconfigurescripts`, then make it runnable as a plain command:
 
 ```bash
-ln -sf /Users/<user>/gitconfigurescripts/enter-git-config.py /usr/local/bin/enter-git-config
-```
-*(Or use `~/gitconfigurescripts/enter-git-config.py`)*
+# Python version (recommended)
+ln -sf ~/gitconfigurescripts/enter-git-config.py /usr/local/bin/enter-git-config
 
-Then execute:
-```bash
-enter-git-config
+# OR the no-Python shell version
+ln -sf ~/gitconfigurescripts/enter-git-config.sh /usr/local/bin/enter-git-config
 ```
 
----
-
-### Option 2: Zsh Shell Alias (`~/.zshrc`)
-
-For default macOS Zsh shells:
-
-```bash
-echo 'alias enter-git-config="python3 /Users/<user>/gitconfigurescripts/enter-git-config.py"' >> ~/.zshrc
-source ~/.zshrc
-```
-
----
-
-### Option 3: Bash Shell Alias (`~/.bashrc`)
-
-For Linux or Bash shells:
-
-```bash
-echo 'alias enter-git-config="python3 /home/<user>/gitconfigurescripts/enter-git-config.py"' >> ~/.bashrc
-source ~/.bashrc
-```
+*(No permission to write to `/usr/local/bin`? Use a shell alias instead — add `alias enter-git-config="~/gitconfigurescripts/enter-git-config.py"` to your `~/.zshrc` or `~/.bashrc`, then `source` it.)*
 
 ---
 
 ## Usage
 
-Run the command from any terminal:
+Run it from any terminal, in any directory:
 
 ```bash
 enter-git-config
 ```
 
-### Main Menu
-
 ```text
 ╭────────────────────────────────────────────────────────────╮
-│               GIT & GITHUB PROFILE MANAGER                 │
+│             GIT & GITHUB PROFILE MANAGER                    │
 ╰────────────────────────────────────────────────────────────╯
  Active Global User:  <user>
  Active Global Email: <user>@example.com
@@ -131,34 +84,44 @@ Please select an option:
   5) Exit
 ```
 
-### Options
+1. **Switch Account** — pick a saved account by number. This sets `user.name`/`user.email` globally **and** switches GitHub authentication (via `gh`) to that account, then optionally opens its VS Code profile.
+2. **Add New Account** — prompts for a nickname, GitHub username, email, optional VS Code profile name, and a Personal Access Token (paste it or import from clipboard). The token is verified against the GitHub API before saving.
+3. **Delete Account** — remove a saved account by its number, username, or email.
+4. **View Accounts** — table of every saved account with masked tokens.
+5. **Exit**
 
-1. **Switch Account**: Displays saved profiles. Select a number to apply the chosen Git identity and GitHub credentials globally.
-2. **Add New Account**: Prompts for:
-   - Account Nickname (e.g., `Work`, `Personal`, `Client-Alpha`)
-   - GitHub Username (e.g., `<user>`)
-   - Git Email (e.g., `<user>@example.com`)
-   - VS Code Profile name (optional — see [VS Code Profiles](#vs-code-profiles-for-the-accounts-panel-sign-in) above)
-   - Personal Access Token (paste manually or import from clipboard)
-   - Performs a test request against GitHub API and confirms validity before saving.
-3. **Delete Account**: Removes a profile by ID number, username, or email.
-4. **View Accounts**: Displays a table of all configured accounts with masked token previews.
-5. **Exit**: Closes the application.
+### Generating a Personal Access Token (PAT)
+
+1. GitHub → **Settings** → **Developer settings** → **Personal access tokens** → **Tokens (classic)**.
+2. **Generate new token (classic)** → give it a label → check the **`repo`** scope.
+3. Generate, copy the token, and paste it into **Add New Account**.
 
 ---
 
-## Generating a GitHub Personal Access Token (PAT)
+## How switching actually works
 
-1. Navigate to GitHub -> Account Settings.
-2. Scroll to the bottom and select **Developer settings**.
-3. Select **Personal access tokens** -> **Tokens (classic)**.
-4. Click **Generate new token** -> **Generate new token (classic)**.
-5. Provide a label and check the **`repo`** scope (required for repository access).
-6. Click **Generate token** and copy the generated token string.
+There are two separate places GitHub identity lives on your machine — this tool handles the first automatically and helps with the second:
+
+1. **Git's credential system** — what `git push`/`pull`/`clone` and your editor's Source Control panel use. `Switch Account` manages this by delegating to `gh` CLI, which tracks multiple GitHub accounts natively and always resolves whichever one you last switched to (this replaces the old, single-account macOS Keychain method, which could authenticate as a stale account even after switching).
+2. **VS Code's own "Sign in with GitHub"** (Accounts icon, bottom-left) — a separate OAuth session used by Copilot, the GitHub Pull Requests extension, and Settings Sync. It can't be set with a token; it always needs an interactive sign-in. To handle this, give an account a **VS Code Profile** name when adding it (Profiles icon in VS Code → Create Profile → sign in with that account's GitHub once via the Accounts icon). From then on, switching that account in this tool offers to open that exact profile window, already signed in.
+
+---
+
+## Repository Structure
+
+```text
+gitconfigurescripts/
+├── README.md               # This file
+├── .gitignore               # Ignores profiles.json / profiles/ and credential files
+├── enter-git-config.py      # Python CLI (recommended)
+├── enter-git-config.sh      # Shell-only CLI (no Python required)
+└── profiles.json            # Local account storage (created on first run, chmod 600, never committed)
+```
 
 ---
 
 ## Security and Privacy
 
-- **Local Storage Only**: Accounts are saved locally in `profiles.json` with permissions restricted to the current user (`chmod 600`).
-- **Ignored by Git**: The `.gitignore` file ensures `profiles.json` is never committed or pushed to remote repositories.
+- Accounts are stored **only locally** in `profiles.json` (Python) or `profiles/*.conf` (shell), permissions restricted to your user (`chmod 600`).
+- `.gitignore` ensures this file is never committed or pushed.
+- Tokens are never printed in full — only masked previews (`ghp_****...1234`) are shown.
