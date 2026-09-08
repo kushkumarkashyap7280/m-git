@@ -95,6 +95,7 @@ def load_profiles():
                 user_m = re.search(r'GIT_USERNAME="([^"]+)"', content)
                 email_m = re.search(r'GIT_EMAIL="([^"]+)"', content)
                 token_m = re.search(r'GIT_TOKEN="([^"]+)"', content)
+                vscode_m = re.search(r'VSCODE_PROFILE="([^"]*)"', content)
 
                 if label_m and user_m and email_m and token_m:
                     existing = any(p.get("username") == user_m.group(1) for p in profiles)
@@ -103,7 +104,8 @@ def load_profiles():
                             "label": label_m.group(1),
                             "username": user_m.group(1),
                             "email": email_m.group(1),
-                            "token": token_m.group(1)
+                            "token": token_m.group(1),
+                            "vscode_profile": (vscode_m.group(1) if vscode_m and vscode_m.group(1) else None)
                         })
                         migrated = True
             except Exception:
@@ -152,6 +154,96 @@ def mask_token(token):
 
 
 # -------------------------------------------------------------
+# GitHub CLI (gh) credential backend
+#
+# Why: `git credential-osxkeychain` (and Linux equivalents) key lookups by
+# protocol+host only when the remote URL has no username in it, so with
+# several accounts stored for the same host, git/VS Code can silently pick
+# up a stale token instead of the one you just switched to. `gh` natively
+# tracks multiple accounts per host and always resolves the *active* one,
+# and it works identically on macOS and Linux (and Windows), so it replaces
+# the Keychain-erase/store dance entirely.
+# -------------------------------------------------------------
+
+def check_gh_cli():
+    """Return True if GitHub CLI (gh) is installed and on PATH."""
+    return run_cmd(["gh", "--version"]) != ""
+
+
+def gh_login_with_token(token):
+    """Log a GitHub account into gh using a PAT (adds it to gh's stored accounts,
+    or refreshes it if already known). Non-interactive: token is piped via stdin."""
+    try:
+        proc = subprocess.run(
+            ["gh", "auth", "login", "--hostname", "github.com", "--git-protocol", "https", "--with-token"],
+            input=token, text=True, capture_output=True, check=False
+        )
+        return proc.returncode == 0, proc.stderr.strip()
+    except Exception as e:
+        return False, str(e)
+
+
+def gh_switch_account(username):
+    """Make `username` the active gh account for github.com (and therefore the
+    one git/VS Code get when they ask for a credential)."""
+    proc = subprocess.run(
+        ["gh", "auth", "switch", "--hostname", "github.com", "--user", username],
+        text=True, capture_output=True, check=False
+    )
+    return proc.returncode == 0
+
+
+def gh_setup_git():
+    """Point git's credential.helper at `gh auth git-credential` (idempotent)."""
+    run_cmd(["gh", "auth", "setup-git"])
+
+
+def apply_github_auth(username, token):
+    """Route git's GitHub credential through gh CLI if available, otherwise fall
+    back to the legacy macOS-only Keychain method (with a warning, since that
+    path is prone to stale-account collisions and doesn't work on Linux)."""
+    if check_gh_cli():
+        ok, err = gh_login_with_token(token)
+        if not ok:
+            print(f"{RED}Warning: 'gh auth login' failed: {err}{RESET}")
+            return False
+        gh_switch_account(username)
+        gh_setup_git()
+        print(f"{DIM}git credential.helper routed through gh CLI (github.com -> {username}).{RESET}")
+        return True
+    else:
+        print(f"{YELLOW}Warning: GitHub CLI 'gh' not found on PATH.{RESET}")
+        print(f"{DIM}Install it (brew install gh / see https://cli.github.com) for reliable multi-account auth.{RESET}")
+        print(f"{DIM}Falling back to macOS Keychain (single-account only, may collide with prior tokens).{RESET}")
+        run_cmd(["git", "config", "--global", "credential.helper", "osxkeychain"])
+        erase_input = "protocol=https\nhost=github.com\n"
+        run_cmd(["git", "credential-osxkeychain", "erase"], stdin_input=erase_input)
+        store_input = f"protocol=https\nhost=github.com\nusername={username}\npassword={token}\n"
+        run_cmd(["git", "credential-osxkeychain", "store"], stdin_input=store_input)
+        return False
+
+
+def launch_vscode_profile(vscode_profile):
+    """Open a new VS Code window pinned to the given profile, if the `code`
+    CLI is available. The GitHub sign-in inside that profile is a separate,
+    OAuth-only session VS Code manages itself -- it must be signed in once,
+    interactively, via that window's Accounts icon; this just opens the
+    correctly-scoped window so you sign in (or already are) as the right account."""
+    if not vscode_profile:
+        return
+    launch = input(f"\nOpen VS Code with profile '{vscode_profile}' now? (y/n): ").strip().lower()
+    if launch != 'y':
+        return
+    if run_cmd(["code", "--version"]):
+        subprocess.run(["code", "-n", "--profile", vscode_profile], check=False)
+        print(f"{GREEN}Launched VS Code with profile '{vscode_profile}'.{RESET}")
+        print(f"{DIM}First time only: sign in via that window's Accounts icon with the matching GitHub account.{RESET}")
+    else:
+        print(f"{YELLOW}Warning: 'code' CLI not found on PATH.{RESET}")
+        print(f"{DIM}In VS Code: Cmd+Shift+P -> 'Shell Command: Install code command in PATH'.{RESET}")
+
+
+# -------------------------------------------------------------
 # Actions
 # -------------------------------------------------------------
 
@@ -183,17 +275,13 @@ def switch_account():
     selected = profiles[int(choice) - 1]
     print(f"\n{YELLOW}Switching globally to {selected['label']}...{RESET}")
 
-    # 1. Update git config globally
+    # 1. Update git config globally (identity)
     run_cmd(["git", "config", "--global", "user.name", selected["username"]])
     run_cmd(["git", "config", "--global", "user.email", selected["email"]])
-    run_cmd(["git", "config", "--global", "credential.helper", "osxkeychain"])
 
-    # 2. Update macOS Keychain credentials
-    erase_input = "protocol=https\nhost=github.com\n"
-    run_cmd(["git", "credential-osxkeychain", "erase"], stdin_input=erase_input)
-
-    store_input = f"protocol=https\nhost=github.com\nusername={selected['username']}\npassword={selected['token']}\n"
-    run_cmd(["git", "credential-osxkeychain", "store"], stdin_input=store_input)
+    # 2. Route GitHub credential resolution through gh CLI (falls back to
+    #    Keychain if gh isn't installed) -- see apply_github_auth() for why.
+    apply_github_auth(selected["username"], selected["token"])
 
     # 3. Verify
     print(f"{DIM}Verifying authentication with GitHub...{RESET}")
@@ -207,7 +295,12 @@ def switch_account():
 
     print(f"Active Git User:  {CYAN}{selected['username']}{RESET}")
     print(f"Active Git Email: {CYAN}{selected['email']}{RESET}\n")
-    input(f"{DIM}Press Enter to return to main menu...{RESET}")
+
+    # 4. Optionally open the matching VS Code profile (separate OAuth session --
+    #    see launch_vscode_profile() docstring).
+    launch_vscode_profile(selected.get("vscode_profile"))
+
+    input(f"\n{DIM}Press Enter to return to main menu...{RESET}")
 
 
 def add_account():
@@ -231,6 +324,10 @@ def add_account():
         print(f"{RED}Error: Email cannot be empty.{RESET}")
         input(f"{DIM}Press Enter to continue...{RESET}")
         return
+
+    vscode_profile = input(
+        f"VS Code Profile name to open on switch {DIM}(optional -- must already exist in VS Code, leave blank to skip){RESET}: "
+    ).strip()
 
     print(f"\n{BOLD}Provide Personal Access Token (PAT):{RESET}")
     print(f"  {CYAN}[1]{RESET} Read directly from Mac Clipboard {GREEN}(Recommended){RESET}")
@@ -271,7 +368,8 @@ def add_account():
         "label": label,
         "username": username,
         "email": email,
-        "token": token
+        "token": token,
+        "vscode_profile": vscode_profile or None
     }
 
     if existing_idx is not None:
@@ -287,15 +385,9 @@ def add_account():
     if switch_now == 'y':
         run_cmd(["git", "config", "--global", "user.name", username])
         run_cmd(["git", "config", "--global", "user.email", email])
-        run_cmd(["git", "config", "--global", "credential.helper", "osxkeychain"])
-
-        erase_input = "protocol=https\nhost=github.com\n"
-        run_cmd(["git", "credential-osxkeychain", "erase"], stdin_input=erase_input)
-
-        store_input = f"protocol=https\nhost=github.com\nusername={username}\npassword={token}\n"
-        run_cmd(["git", "credential-osxkeychain", "store"], stdin_input=store_input)
-
+        apply_github_auth(username, token)
         print(f"{GREEN}Switched active Git user to {username} ({email})!{RESET}")
+        launch_vscode_profile(vscode_profile)
 
     input(f"\n{DIM}Press Enter to return to main menu...{RESET}")
 
@@ -352,10 +444,11 @@ def view_accounts():
         print(f"\n{YELLOW}Warning: No saved accounts found.{RESET}\n")
     else:
         print(f"\n{BOLD}All Configured Accounts:{RESET}\n")
-        print(f"{'#':<4} {'Label':<20} {'Username':<22} {'Email':<30} {'Token'}")
-        print(f"{DIM}─" * 90 + f"{RESET}")
+        print(f"{'#':<4} {'Label':<18} {'Username':<18} {'Email':<26} {'Token':<12} {'VS Code Profile'}")
+        print(f"{DIM}─" * 100 + f"{RESET}")
         for idx, p in enumerate(profiles, 1):
-            print(f"{idx:<4} {CYAN}{p['label']:<20}{RESET} {BLUE}{p['username']:<22}{RESET} {p['email']:<30} {DIM}{mask_token(p['token'])}{RESET}")
+            vsc = p.get("vscode_profile") or f"{DIM}(none){RESET}"
+            print(f"{idx:<4} {CYAN}{p['label']:<18}{RESET} {BLUE}{p['username']:<18}{RESET} {p['email']:<26} {DIM}{mask_token(p['token']):<12}{RESET} {vsc}")
         print("")
 
     input(f"{DIM}Press Enter to return to main menu...{RESET}")
